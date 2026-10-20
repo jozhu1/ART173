@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Whole Rabbit Scan</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+    canvas { display: block; }
+  </style>
+  <script src="p5.js"></script>
+</head>
+<body>
+<script>
+const sketch = (p) => {
+  const storageKey = 'rabbit-mask-placement';
+  const sliceCount = 112;
+  const framesPerSlice = 4;
+  const pixelStep = 2;
+  const cellSize = 32;
+  const organs = [
+    { x: 459, y: 165, rx: 31, ry: 18, z: -0.18, rz: 0.47,
+      color: [47, 174, 119], seed: 1, angle: -0.2, lobes: 4, pinch: 0.25, taper: 0.20 },
+    { x: 414, y: 204, rx: 48, ry: 33, z: -0.24, rz: 0.58,
+      color: [172, 91, 151], seed: 2, angle: -0.35, lobes: 5, pinch: 0.36, taper: -0.22 },
+    { x: 381, y: 241, rx: 25, ry: 34, z: 0.15, rz: 0.41,
+      color: [211, 56, 104], seed: 3, angle: -0.2, lobes: 3, pinch: 0.12, taper: 0.38 },
+    { x: 336, y: 238, rx: 43, ry: 48, z: -0.04, rz: 0.64,
+      color: [246, 110, 129], seed: 4, angle: 0.22, lobes: 6, pinch: 0.28, taper: -0.34 },
+    { x: 284, y: 254, rx: 58, ry: 57, z: 0.20, rz: 0.65,
+      color: [221, 111, 126], seed: 5, angle: -0.15, lobes: 7, pinch: 0.33, taper: 0.24 },
+    { x: 353, y: 277, rx: 27, ry: 31, z: 0.27, rz: 0.40,
+      color: [116, 176, 73], seed: 6, angle: 0.45, lobes: 3, pinch: 0.21, taper: -0.42 },
+    { x: 216, y: 277, rx: 35, ry: 27, z: -0.37, rz: 0.46,
+      color: [167, 66, 118], seed: 7, angle: 0.36, lobes: 5, pinch: 0.42, taper: 0.32 },
+    { x: 259, y: 304, rx: 19, ry: 15, z: 0.37, rz: 0.30,
+      color: [247, 178, 68], seed: 8, angle: -0.24, lobes: 4, pinch: 0.06, taper: -0.30 },
+    { x: 460, y: 219, rx: 41, ry: 8, z: 0.05, rz: 0.28,
+      color: [221, 99, 144], seed: 9, angle: -0.62, lobes: 3, pinch: 0.10, taper: 0.12 },
+    { x: 306, y: 211, rx: 32, ry: 13, z: -0.39, rz: 0.31,
+      color: [230, 161, 109], seed: 10, angle: 0.37, lobes: 5, pinch: 0.20, taper: -0.40 },
+    { x: 242, y: 214, rx: 26, ry: 16, z: -0.10, rz: 0.35,
+      color: [119, 164, 152], seed: 11, angle: -0.38, lobes: 4, pinch: 0.36, taper: 0.45 },
+    { x: 397, y: 295, rx: 14, ry: 24, z: 0.32, rz: 0.32,
+      color: [234, 155, 105], seed: 12, angle: 0.21, lobes: 3, pinch: 0.24, taper: 0.27 },
+    { x: 194, y: 322, rx: 22, ry: 9, z: -0.11, rz: 0.24,
+      color: [126, 136, 182], seed: 13, angle: -0.26, lobes: 5, pinch: 0.10, taper: -0.16 }
+  ];
+  let maskImg, distances, calibrationImg, sliceLayer, organGrid, gridColumns;
+  let slices = [];
+  let maskX = 0, maskY = 0, maskScale = 1;
+  let clock = 0, paused = false, calibrationMode = false;
+
+  p.preload = () => {
+    maskImg = p.loadImage('arabbit.png');
+  };
+
+  p.setup = () => {
+    p.createCanvas(p.windowWidth, p.windowHeight);
+    p.pixelDensity(1);
+    maskImg.loadPixels();
+    distances = makeDistanceMap();
+    addSmallStructures();
+    for (const organ of organs) {
+      organ.cos = Math.cos(organ.angle);
+      organ.sin = Math.sin(organ.angle);
+    }
+    buildOrganGrid();
+    calibrationImg = p.createGraphics(maskImg.width, maskImg.height);
+    calibrationImg.pixelDensity(1);
+    calibrationImg.background(30, 255, 80);
+    applyMask(calibrationImg);
+    sliceLayer = p.createGraphics(maskImg.width, maskImg.height);
+    sliceLayer.pixelDensity(1);
+
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey));
+      if (saved) {
+        maskX = Number(saved.x) || 0;
+        maskY = Number(saved.y) || 0;
+        maskScale = Number(saved.scale) || 1;
+      }
+    } catch (error) {}
+  };
+
+  function makeDistanceMap() {
+    const w = maskImg.width, h = maskImg.height;
+    const d = new Float32Array(w * h);
+    const diagonal = Math.SQRT2;
+    for (let i = 0; i < d.length; i++) {
+      d[i] = maskImg.pixels[i * 4 + 3] > 100 ? 10000 : 0;
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (x) d[i] = Math.min(d[i], d[i - 1] + 1);
+      if (y) d[i] = Math.min(d[i], d[i - w] + 1);
+      if (x && y) d[i] = Math.min(d[i], d[i - w - 1] + diagonal);
+      if (x < w - 1 && y) d[i] = Math.min(d[i], d[i - w + 1] + diagonal);
+    }
+    for (let y = h - 1; y >= 0; y--) for (let x = w - 1; x >= 0; x--) {
+      const i = y * w + x;
+      if (x < w - 1) d[i] = Math.min(d[i], d[i + 1] + 1);
+      if (y < h - 1) d[i] = Math.min(d[i], d[i + w] + 1);
+      if (x < w - 1 && y < h - 1) d[i] = Math.min(d[i], d[i + w + 1] + diagonal);
+      if (x && y < h - 1) d[i] = Math.min(d[i], d[i + w - 1] + diagonal);
+    }
+    return d;
+  }
+
+  function applyMask(g) {
+    const ctx = g.drawingContext;
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-in';
+    g.image(maskImg, 0, 0, g.width, g.height);
+    ctx.restore();
+  }
+
+  function addSmallStructures() {
+    let state = 20261019;
+    const random01 = () => ((state = (Math.imul(state, 1664525) + 1013904223) | 0) >>> 0) / 4294967296;
+    const palette = [
+      [111, 175, 148], [190, 96, 157], [232, 148, 103],
+      [124, 127, 186], [177, 188, 99], [219, 105, 126]
+    ];
+    let added = 0;
+    for (let attempt = 0; attempt < 150 && added < 27; attempt++) {
+      const head = added % 6 === 0;
+      const x = head ? 404 + random01() * 90 : 178 + random01() * 290;
+      const y = head ? 139 + random01() * 75 : 203 + random01() * 123;
+      const ix = Math.round(x), iy = Math.round(y);
+      if (distances[iy * maskImg.width + ix] < 15) continue;
+      organs.push({
+        x, y, rx: 7 + random01() * 17, ry: 6 + random01() * 18,
+        z: -0.52 + random01() * 1.04, rz: 0.17 + random01() * 0.28,
+        color: palette[Math.floor(random01() * palette.length)],
+        seed: 30 + added, angle: -0.8 + random01() * 1.6,
+        lobes: 3 + Math.floor(random01() * 5),
+        pinch: random01() * 0.46, taper: -0.5 + random01()
+      });
+      added++;
+    }
+  }
+
+  function buildOrganGrid() {
+    gridColumns = Math.ceil(maskImg.width / cellSize);
+    const gridRows = Math.ceil(maskImg.height / cellSize);
+    organGrid = Array.from({ length: gridColumns * gridRows }, () => []);
+    for (const organ of organs) {
+      const reach = Math.max(organ.rx, organ.ry) * 1.45;
+      const left = Math.max(0, Math.floor((organ.x - reach) / cellSize));
+      const right = Math.min(gridColumns - 1, Math.floor((organ.x + reach) / cellSize));
+      const top = Math.max(0, Math.floor((organ.y - reach) / cellSize));
+      const bottom = Math.min(gridRows - 1, Math.floor((organ.y + reach) / cellSize));
+      for (let cy = top; cy <= bottom; cy++) for (let cx = left; cx <= right; cx++) {
+        organGrid[cy * gridColumns + cx].push(organ);
+      }
+    }
+  }
+
+  function makeSlice(index) {
+    const w = Math.ceil(maskImg.width / pixelStep);
+    const h = Math.ceil(maskImg.height / pixelStep);
+    const z = -0.96 + 1.92 * index / (sliceCount - 1);
+    const depth = Math.abs(z);
+    const image = p.createImage(w, h);
+    image.loadPixels();
+
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const px = Math.min(maskImg.width - 1, x * pixelStep);
+      const py = Math.min(maskImg.height - 1, y * pixelStep);
+      const source = py * maskImg.width + px;
+      const at = (y * w + x) * 4;
+      const a = maskImg.pixels[source * 4 + 3];
+      if (a < 10) continue;
+
+      const tissue = p.noise(px * 0.032, py * 0.032, z * 1.8 + 20);
+      const thickness = Math.min(0.99,
+        0.10 + 0.112 * Math.sqrt(distances[source]) + 0.025 * (tissue - 0.5));
+      if (depth >= thickness) continue;
+      const inner = (thickness - depth) / thickness;
+      const grain = ((px * 37 + py * 91 + index * 113) ^ (px * py * 3)) & 31;
+      const rim = Math.max(0, 1 - inner * 14);
+      let red = 68 + inner * 29 + grain * 0.7 + 25 * (tissue - 0.5) + 70 * rim;
+      let green = 43 + inner * 23 + grain * 0.5 + 17 * (tissue - 0.5) + 47 * rim;
+      let blue = 69 + inner * 31 + grain * 0.6 + 29 * (tissue - 0.5) + 71 * rim;
+
+      const cell = Math.floor(py / cellSize) * gridColumns + Math.floor(px / cellSize);
+      for (const organ of organGrid[cell]) {
+        const oz = (z - organ.z) / organ.rz;
+        const section = 1 - oz * oz;
+        if (section <= 0) continue;
+        const dx = px - organ.x, dy = py - organ.y;
+        const ox = (dx * organ.cos + dy * organ.sin) / organ.rx;
+        const oy = (-dx * organ.sin + dy * organ.cos) / organ.ry;
+        if (Math.abs(ox) > 1.3 || Math.abs(oy) > 1.3) continue;
+
+        const coarse = p.noise(
+          px * 0.038 + organ.seed * 8,
+          py * 0.038 + organ.seed * 11,
+          z * 2.2 + organ.seed * 5
+        );
+        const fine = p.noise(
+          px * 0.13 + organ.seed * 23,
+          py * 0.13 + organ.seed * 17,
+          z * 4.2 + organ.seed * 7
+        );
+        const angle = Math.atan2(oy, ox);
+        const lobes = 0.16 * Math.sin(angle * organ.lobes + organ.seed * 1.7);
+        const notch = organ.pinch * Math.max(0, ox + 0.12) *
+          Math.max(0, 1 - Math.abs(oy) * 1.8);
+        const taper = Math.max(0.55, 1 + organ.taper * oy);
+        const field = section * (1 + 0.85 * (coarse - 0.5) +
+          0.24 * (fine - 0.5) + lobes - notch) - ox * ox * taper - oy * oy;
+        const coverage = Math.max(0, Math.min(1, field * 5));
+        if (coverage <= 0) continue;
+
+        const contour = Math.max(0, 1 - Math.abs(field - 0.12) * 6);
+        const speckle = ((px * 53 + py * 29 + index * 17 + organ.seed * 37) ^
+          (px * py * 5)) & 31;
+        const density = 0.59 + fine * 0.64 + (coarse - 0.5) * 0.20 + speckle * 0.004;
+        const blend = coverage * 0.96;
+        red += (organ.color[0] * density + contour * 34 - red) * blend;
+        green += (organ.color[1] * density + contour * 28 - green) * blend;
+        blue += (organ.color[2] * density + contour * 31 - blue) * blend;
+      }
+
+      image.pixels[at] = red;
+      image.pixels[at + 1] = green;
+      image.pixels[at + 2] = blue;
+      image.pixels[at + 3] = Math.min(a, 255 * Math.min(1, inner * 10));
+    }
+    image.updatePixels();
+    return image;
+  }
+
+  function maskRect() {
+    const fit = Math.min(p.width / maskImg.width, p.height / maskImg.height);
+    const w = maskImg.width * fit * maskScale;
+    const h = maskImg.height * fit * maskScale;
+    return { x: (p.width - w) / 2 + maskX, y: (p.height - h) / 2 + maskY, w, h };
+  }
+
+  p.draw = () => {
+    p.background(0);
+    const rect = maskRect();
+    if (calibrationMode) {
+      p.image(calibrationImg, rect.x, rect.y, rect.w, rect.h);
+      return;
+    }
+    if (!paused) clock++;
+    const journey = 2 * (sliceCount - 1);
+    const step = Math.floor(clock / framesPerSlice) % journey;
+    const index = step < sliceCount ? step : journey - step;
+    if (!slices[index]) slices[index] = makeSlice(index);
+    sliceLayer.clear();
+    sliceLayer.image(slices[index], 0, 0, maskImg.width, maskImg.height);
+    applyMask(sliceLayer);
+    p.image(sliceLayer, rect.x, rect.y, rect.w, rect.h);
+  };
+
+  p.keyPressed = () => {
+    const step = p.keyIsDown(p.SHIFT) ? 10 : 1;
+    let changed = false;
+    if (p.key === 'c' || p.key === 'C') calibrationMode = !calibrationMode;
+    else if (p.key === 'f' || p.key === 'F') p.fullscreen(!p.fullscreen());
+    else if (p.key === ' ') paused = !paused;
+    else if (p.keyCode === p.LEFT_ARROW) { maskX -= step; changed = true; }
+    else if (p.keyCode === p.RIGHT_ARROW) { maskX += step; changed = true; }
+    else if (p.keyCode === p.UP_ARROW) { maskY -= step; changed = true; }
+    else if (p.keyCode === p.DOWN_ARROW) { maskY += step; changed = true; }
+    else if (p.key === '+' || p.key === '=') { maskScale *= 1.01; changed = true; }
+    else if (p.key === '-') { maskScale /= 1.01; changed = true; }
+    else return;
+    if (changed) localStorage.setItem(storageKey,
+      JSON.stringify({ x: maskX, y: maskY, scale: maskScale }));
+    return false;
+  };
+
+  p.windowResized = () => p.resizeCanvas(p.windowWidth, p.windowHeight);
+};
+
+new p5(sketch);
+</script>
+</body>
+</html>

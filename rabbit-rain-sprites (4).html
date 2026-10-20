@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rabbit Ink</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: black; }
+    canvas { display: block; }
+  </style>
+  <script src="p5.js"></script>
+</head>
+<body>
+<script>
+const sketch = (p) => {
+  const storageKey = 'rabbit-mask-placement';
+  const spriteRects = [
+    [8, 6, 63, 65], [79, 8, 93, 61], [176, 6, 91, 65],
+    [274, 6, 68, 65], [352, 7, 80, 64], [439, 6, 65, 65],
+    [8, 74, 65, 65], [83, 74, 56, 65], [146, 75, 30, 64],
+    [183, 75, 47, 64], [239, 74, 64, 65], [312, 75, 51, 64],
+    [371, 75, 60, 64], [435, 76, 69, 63],
+    [8, 142, 69, 65], [79, 143, 72, 63], [151, 143, 84, 64],
+    [238, 142, 56, 65], [298, 144, 70, 61], [375, 142, 63, 65],
+    [442, 142, 62, 65],
+    [8, 210, 62, 64], [83, 210, 34, 64], [128, 210, 56, 64],
+    [194, 210, 46, 64], [248, 210, 77, 64], [336, 210, 45, 64],
+    [396, 210, 35, 64], [443, 210, 63, 64]
+  ];
+  const restingPoses = [0, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+                        17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28];
+  const crouchingPoses = [7, 15, 18, 25];
+  const leapingPoses = [1, 2, 4, 16, 25];
+  const earPoses = [8, 9, 21, 22, 23, 27];
+  const poseFacing = [
+    1, 1, 1, 1, -1, -1, 1, -1, 1, 1, -1, -1, -1, -1, 1,
+    1, 1, 1, 1, -1, -1, 1, 1, 1, -1, -1, 1, 1, -1
+  ];
+  const regions = ['ear', 'head', 'front', 'lower', 'body', 'tail'];
+  const landingStep = 8;
+  const morphPixels = 144;
+  const morphExtent = 2.1;
+
+  let maskImg;
+  let spriteSheet;
+  let poses = [];
+  let splatters = [];
+  let rabbits = [];
+  let landingAreas;
+  let regionBag = [];
+  let calibrationMode = false;
+  let maskX = 0;
+  let maskY = 0;
+  let maskScale = 1;
+  const maxRabbits = 24;
+
+  p.preload = () => {
+    maskImg = p.loadImage('arabbit.png');
+    spriteSheet = p.loadImage('_ (15).jpeg');
+  };
+
+  p.setup = () => {
+    p.createCanvas(p.windowWidth, p.windowHeight);
+    p.noStroke();
+    maskImg.loadPixels();
+    spriteSheet.loadPixels();
+    buildLandingAreas();
+
+    poses = spriteRects.map(([sx, sy, sw, sh]) => {
+      const pose = p.createImage(sw, sh);
+      pose.loadPixels();
+
+      for (let y = 0; y < sh; y++) {
+        for (let x = 0; x < sw; x++) {
+          const source = 4 * ((sy + y) * spriteSheet.width + sx + x);
+          const target = 4 * (y * sw + x);
+          const green = spriteSheet.pixels[source + 1];
+          const alpha = p.constrain((green - 28) * 4, 0, 255);
+          pose.pixels[target] = 0;
+          pose.pixels[target + 1] = 0;
+          pose.pixels[target + 2] = 0;
+          pose.pixels[target + 3] = alpha;
+        }
+      }
+
+      pose.updatePixels();
+      return pose;
+    });
+
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey));
+      if (saved) {
+        maskX = Number(saved.x) || 0;
+        maskY = Number(saved.y) || 0;
+        maskScale = Number(saved.scale) || 1;
+      }
+    } catch (error) {
+      maskX = 0;
+      maskY = 0;
+      maskScale = 1;
+    }
+
+    for (let i = 0; i < 10; i++) spawnSplatter(-Math.floor(p.random(0, 140)));
+  };
+
+  function maskRect() {
+    const fit = Math.min(p.width / maskImg.width, p.height / maskImg.height);
+    const w = maskImg.width * fit * maskScale;
+    const h = maskImg.height * fit * maskScale;
+    return { x: (p.width - w) / 2 + maskX, y: (p.height - h) / 2 + maskY, w, h };
+  }
+
+  function maskAlphaAt(x, y) {
+    const ix = Math.round(x), iy = Math.round(y);
+    if (ix < 0 || iy < 0 || ix >= maskImg.width || iy >= maskImg.height) return 0;
+    return maskImg.pixels[4 * (iy * maskImg.width + ix) + 3];
+  }
+
+  function restPoseAt(x, y) {
+    return p.random(x > 245 && x < 400 && y < 110 ? earPoses : restingPoses);
+  }
+
+  function buildLandingAreas() {
+    landingAreas = Object.fromEntries(regions.map(name => [name, []]));
+    for (let y = landingStep / 2; y < maskImg.height; y += landingStep) {
+      for (let x = landingStep / 2; x < maskImg.width; x += landingStep) {
+        if (maskAlphaAt(x, y) < 180) continue;
+        const point = { x, y };
+        if (x > 245 && x < 385 && y < 104) landingAreas.ear.push(point);
+        if (x > 392 && y < 220) landingAreas.head.push(point);
+        if (x > 390 && y >= 210) landingAreas.front.push(point);
+        if (y > 285 && x > 170 && x < 425) landingAreas.lower.push(point);
+        if (x > 225 && x < 390 && y > 168 && y < 300) landingAreas.body.push(point);
+        if (x < 225 && y > 135 && y < 315) landingAreas.tail.push(point);
+      }
+    }
+  }
+
+  function nextSpawnRegion() {
+    if (!regionBag.length) {
+      regionBag = regions.map((_, index) => index);
+      for (let i = regionBag.length - 1; i > 0; i--) {
+        const j = Math.floor(p.random(i + 1));
+        [regionBag[i], regionBag[j]] = [regionBag[j], regionBag[i]];
+      }
+    }
+    return regionBag.pop();
+  }
+
+  function spawnSplatter(age = 0) {
+    if (rabbits.length + splatters.length >= maxRabbits) return;
+    const regionIndex = nextSpawnRegion();
+    const point = p.random(landingAreas[regions[regionIndex]]);
+    if (!point) return;
+    const size = p.random(18, 27);
+    const edge = Array.from({ length: 48 }, () =>
+      p.random(0.57, 0.8) + (p.random() < 0.13 ? p.random(0.3, 0.92) : 0)
+    );
+    const flecks = Array.from({ length: 14 }, () => ({
+      angle: p.random(p.TWO_PI),
+      distance: p.random(0.8, 1.85),
+      radius: p.random(0.022, 0.085)
+    }));
+    const splatter = {
+      x: point.x,
+      y: point.y,
+      size,
+      direction: p.random([-1, 1]),
+      restPose: restPoseAt(point.x, point.y),
+      age,
+      edge,
+      flecks
+    };
+    buildMorph(splatter);
+    splatters.push(splatter);
+  }
+
+  function distanceTo(mask, value) {
+    const n = morphPixels;
+    const distance = new Float32Array(n * n);
+    const diagonal = Math.SQRT2;
+
+    for (let i = 0; i < distance.length; i++) {
+      distance[i] = mask[i] === value ? 0 : 10000;
+    }
+
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        const i = y * n + x;
+        if (x) distance[i] = Math.min(distance[i], distance[i - 1] + 1);
+        if (y) distance[i] = Math.min(distance[i], distance[i - n] + 1);
+        if (x && y) distance[i] = Math.min(distance[i], distance[i - n - 1] + diagonal);
+        if (x < n - 1 && y) distance[i] = Math.min(distance[i], distance[i - n + 1] + diagonal);
+      }
+    }
+
+    for (let y = n - 1; y >= 0; y--) {
+      for (let x = n - 1; x >= 0; x--) {
+        const i = y * n + x;
+        if (x < n - 1) distance[i] = Math.min(distance[i], distance[i + 1] + 1);
+        if (y < n - 1) distance[i] = Math.min(distance[i], distance[i + n] + 1);
+        if (x < n - 1 && y < n - 1) distance[i] = Math.min(distance[i], distance[i + n + 1] + diagonal);
+        if (x && y < n - 1) distance[i] = Math.min(distance[i], distance[i + n - 1] + diagonal);
+      }
+    }
+
+    return distance;
+  }
+
+  function signedDistance(alpha) {
+    const mask = Uint8Array.from(alpha, value => value >= 128 ? 1 : 0);
+    const inside = distanceTo(mask, 1);
+    const outside = distanceTo(mask, 0);
+    for (let i = 0; i < inside.length; i++) inside[i] -= outside[i];
+    return inside;
+  }
+
+  function buildMorph(splatter) {
+    const n = morphPixels;
+    const graphics = p.createGraphics(n, n);
+    graphics.pixelDensity(1);
+    graphics.noStroke();
+    const units = n / (splatter.size * morphExtent * 2);
+    const radius = splatter.size * 0.94;
+
+    graphics.clear();
+    graphics.push();
+    graphics.translate(n / 2, n / 2);
+    graphics.scale(units);
+    graphics.fill(0);
+    graphics.beginShape();
+    for (let i = 0; i < splatter.edge.length; i++) {
+      const angle = p.TWO_PI * i / splatter.edge.length;
+      const distance = radius * splatter.edge[i];
+      graphics.vertex(Math.cos(angle) * distance, Math.sin(angle) * distance * 0.82);
+    }
+    graphics.endShape(p.CLOSE);
+    for (const fleck of splatter.flecks) {
+      const distance = radius * fleck.distance;
+      graphics.circle(Math.cos(fleck.angle) * distance,
+                      Math.sin(fleck.angle) * distance * 0.82,
+                      radius * fleck.radius * 2);
+    }
+    graphics.pop();
+    graphics.loadPixels();
+
+    splatter.image = p.createImage(n, n);
+    splatter.image.loadPixels();
+    const inkAlpha = new Uint8Array(n * n);
+    for (let i = 0; i < inkAlpha.length; i++) {
+      inkAlpha[i] = graphics.pixels[i * 4 + 3];
+      splatter.image.pixels[i * 4 + 3] = inkAlpha[i];
+    }
+    splatter.image.updatePixels();
+
+    graphics.clear();
+    graphics.push();
+    graphics.translate(n / 2, n / 2);
+    graphics.scale(units * splatter.direction * poseFacing[splatter.restPose], units);
+    const pose = poses[splatter.restPose];
+    const height = splatter.size * 2.4;
+    const width = height * pose.width / pose.height;
+    graphics.image(pose, -width / 2, -height / 2, width, height);
+    graphics.pop();
+    graphics.loadPixels();
+
+    splatter.rabbitAlpha = new Uint8Array(n * n);
+    for (let i = 0; i < splatter.rabbitAlpha.length; i++) {
+      splatter.rabbitAlpha[i] = graphics.pixels[i * 4 + 3];
+    }
+    splatter.inkDistance = signedDistance(inkAlpha);
+    splatter.rabbitDistance = signedDistance(splatter.rabbitAlpha);
+    graphics.remove();
+  }
+
+  function updateMorph(splatter, amount) {
+    const pixels = splatter.image.pixels;
+    for (let i = 0; i < splatter.inkDistance.length; i++) {
+      const distance = p.lerp(splatter.inkDistance[i], splatter.rabbitDistance[i], amount);
+      pixels[i * 4 + 3] = amount >= 0.995 ? splatter.rabbitAlpha[i] :
+                           p.constrain(Math.round((0.5 - distance) * 255), 0, 255);
+    }
+    splatter.image.updatePixels();
+  }
+
+  function drawSplatter(splatter, rect, expansion) {
+    const scale = rect.w / maskImg.width;
+    const side = splatter.size * morphExtent * 2 * scale;
+    p.push();
+    p.translate(rect.x + splatter.x * scale, rect.y + splatter.y * scale);
+    p.scale(expansion);
+    p.image(splatter.image, -side / 2, -side / 2, side, side);
+    p.pop();
+  }
+
+  function drawRabbit(x, y, size, direction, growth, poseIndex, rect,
+                      airborne = 0, sway = 0, tiltAngle = 0) {
+    if (growth <= 0.01) return;
+    const pose = poses[poseIndex];
+    const scale = rect.w / maskImg.width;
+    const h = size * 2.4 * scale;
+    const w = h * pose.width / pose.height;
+    const tilt = p.constrain(tiltAngle, -0.65, 0.65) * airborne + sway;
+    p.push();
+    p.translate(rect.x + x * scale, rect.y + y * scale);
+    p.rotate(tilt);
+    p.scale(direction * poseFacing[poseIndex] * growth, growth);
+    p.image(pose, -w / 2, -h / 2, w, h);
+    p.pop();
+  }
+
+  function startHop(rabbit) {
+    rabbit.hopProgress = 0;
+    rabbit.crouchPose = p.random(crouchingPoses);
+    rabbit.takeoffPose = p.random(leapingPoses);
+    rabbit.airPose = p.random(leapingPoses);
+    rabbit.landingPose = p.random(crouchingPoses);
+    rabbit.velocity.x = rabbit.direction * rabbit.currentSpeed;
+    rabbit.velocity.y += p.random(-0.12, 0.12);
+  }
+
+  function drawMovingRabbit(rabbit, rect) {
+    if (rabbit.restFrames > 0) {
+      rabbit.restFrames--;
+      drawRabbit(rabbit.x, rabbit.y, rabbit.size,
+                 rabbit.direction, 1, rabbit.restPose, rect);
+      if (rabbit.restFrames === 0) startHop(rabbit);
+      return;
+    }
+
+    rabbit.hopProgress = Math.min(1, rabbit.hopProgress + rabbit.hopRate);
+    const t = rabbit.hopProgress;
+    const jump = Math.sin(Math.PI * t);
+
+    if (t > 0.12 && t < 0.9) {
+      const flow = p.noise(
+        rabbit.seed + rabbit.x * 0.006,
+        rabbit.seed + 100 + rabbit.y * 0.006,
+        p.frameCount * 0.003
+      );
+      const speedNoise = p.noise(rabbit.seed + 500, p.frameCount * 0.006,
+                                 rabbit.y * 0.004);
+      const targetSpeed = rabbit.baseSpeed * p.map(speedNoise, 0, 1, 0.55, 1.55);
+      rabbit.currentSpeed = p.lerp(rabbit.currentSpeed, targetSpeed, 0.045);
+      rabbit.acceleration.y += ((flow - 0.5) * 0.11 + rabbit.turnBias) / rabbit.mass;
+      rabbit.velocity.y = p.constrain((rabbit.velocity.y + rabbit.acceleration.y) * 0.94,
+                                       -0.85, 0.85);
+      rabbit.velocity.x = rabbit.direction * rabbit.currentSpeed;
+      rabbit.acceleration.mult(0);
+
+      const stride = 0.65 + 0.55 * jump;
+      rabbit.x += rabbit.velocity.x * stride;
+      rabbit.y += rabbit.velocity.y * stride;
+    }
+
+    const poseIndex = t < 0.15 ? rabbit.crouchPose :
+      t < 0.47 ? rabbit.takeoffPose :
+      t < 0.82 ? rabbit.airPose :
+      t < 0.94 ? rabbit.landingPose : rabbit.restPose;
+    const sway = (p.noise(rabbit.seed + 700, p.frameCount * 0.012) - 0.5) *
+                 0.18 * jump;
+    drawRabbit(rabbit.x, rabbit.y - jump * rabbit.size * 1.05,
+               rabbit.size, rabbit.direction, 1, poseIndex, rect, jump, sway,
+               Math.atan2(rabbit.velocity.y, Math.abs(rabbit.velocity.x)));
+
+    if (t >= 1) {
+      rabbit.restPose = restPoseAt(rabbit.x, rabbit.y);
+      rabbit.restFrames = Math.floor(p.random(45, 95));
+      rabbit.velocity.y *= 0.8;
+    }
+  }
+
+  function outsideView(rabbit, rect) {
+    const scale = rect.w / maskImg.width;
+    const x = rect.x + rabbit.x * scale;
+    const y = rect.y + rabbit.y * scale;
+    const margin = rabbit.size * 2.5 * scale;
+    return x < -margin || x > p.width + margin ||
+           y < -margin || y > p.height + margin;
+  }
+
+  p.draw = () => {
+    const rect = maskRect();
+    if (calibrationMode) {
+      p.background(30, 255, 80);
+    } else {
+      p.background(255);
+
+      if (p.frameCount % 28 === 0) {
+        spawnSplatter();
+      }
+
+      for (let i = splatters.length - 1; i >= 0; i--) {
+        const splatter = splatters[i];
+        splatter.age++;
+        if (splatter.age < 0) continue;
+        const spread = p.constrain(splatter.age / 18, 0, 1);
+        const morph = p.constrain((splatter.age - 48) / 130, 0, 1);
+        const smoothMorph = morph * morph * (3 - 2 * morph);
+
+        if (morph >= 1) {
+          const startingSpeed = p.random(0.9, 1.6);
+          rabbits.push({
+            x: splatter.x,
+            y: splatter.y,
+            size: splatter.size,
+            direction: splatter.direction,
+            velocity: p.createVector(splatter.direction * startingSpeed, p.random(-0.2, 0.2)),
+            acceleration: p.createVector(0, 0),
+            mass: p.random(0.8, 1.6),
+            baseSpeed: startingSpeed,
+            currentSpeed: startingSpeed,
+            turnBias: p.random(-0.012, 0.012),
+            outsideFrames: 0,
+            seed: p.random(10000),
+            hopProgress: 0,
+            hopRate: p.random(0.01, 0.015),
+            restFrames: Math.floor(p.random(45, 95)),
+            restPose: splatter.restPose
+          });
+          splatters.splice(i, 1);
+          continue;
+        }
+
+        const expansion = 0.15 + 0.85 * (1 - Math.pow(1 - spread, 3));
+        if (morph > 0) updateMorph(splatter, smoothMorph);
+        drawSplatter(splatter, rect, expansion);
+      }
+
+      for (let i = rabbits.length - 1; i >= 0; i--) {
+        const rabbit = rabbits[i];
+        drawMovingRabbit(rabbit, rect);
+        rabbit.outsideFrames = maskAlphaAt(rabbit.x, rabbit.y) < 10 ?
+          rabbit.outsideFrames + 1 : 0;
+        if (outsideView(rabbit, rect) || rabbit.outsideFrames > 120) {
+          rabbits.splice(i, 1);
+        }
+      }
+    }
+
+    const ctx = p.drawingContext;
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-in';
+    p.image(maskImg, rect.x, rect.y, rect.w, rect.h);
+    ctx.restore();
+  };
+
+  function savePlacement() {
+    localStorage.setItem(storageKey, JSON.stringify({ x: maskX, y: maskY, scale: maskScale }));
+  }
+
+  p.keyPressed = () => {
+    const step = p.keyIsDown(p.SHIFT) ? 10 : 1;
+    if (p.key === 'c' || p.key === 'C') calibrationMode = !calibrationMode;
+    else if (p.key === 'f' || p.key === 'F') p.fullscreen(!p.fullscreen());
+    else if (p.keyCode === p.LEFT_ARROW) maskX -= step;
+    else if (p.keyCode === p.RIGHT_ARROW) maskX += step;
+    else if (p.keyCode === p.UP_ARROW) maskY -= step;
+    else if (p.keyCode === p.DOWN_ARROW) maskY += step;
+    else if (p.key === '+' || p.key === '=') maskScale *= 1.01;
+    else if (p.key === '-') maskScale /= 1.01;
+    else return;
+    savePlacement();
+    return false;
+  };
+
+  p.windowResized = () => {
+    p.resizeCanvas(p.windowWidth, p.windowHeight);
+  };
+};
+
+new p5(sketch);
+</script>
+</body>
+</html>
