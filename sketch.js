@@ -18,7 +18,7 @@ const sketch = (p) => {
   const inkColors = [[0, 240, 255], [255, 0, 235], [255, 225, 0]];
   const overlayOpacity = 0.88;
   const micQuiet = 0.006;
-  const micLoud = 0.05;
+  const micLoud = 0.01;
   const quietRabbits = 4;
 
   let maskImg;
